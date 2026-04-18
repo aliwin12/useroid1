@@ -11,6 +11,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, Globe, Database, Settings, Activity, Link as LinkIcon, RefreshCcw, ExternalLink, ChevronRight, X, ArrowUp, ArrowDown, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI, Type } from "@google/genai";
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 type SearchProvider = 'Nexus' | 'Google' | 'Bing' | 'Yandex' | 'Rambler' | 'Mail.ru';
 
@@ -86,14 +89,84 @@ export default function App() {
 
     setIsSearching(true);
     setHasSearched(true);
+    setResults([]);
+
     try {
-      const res = await fetch(`/api/search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ q: query, providers: providers })
+      const activeExternalProviders = providers.filter(p => p.enabled && p.id !== 'Nexus');
+      const nexusEnabled = providers.find(p => p.id === 'Nexus')?.enabled;
+
+      let allFoundResults: SearchResult[] = [];
+
+      // 1. Fetch Local (Nexus) Results if enabled
+      if (nexusEnabled) {
+        try {
+          const res = await fetch(`/api/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ q: query, providers: [{ id: 'Nexus', enabled: true, priority: 1 }] })
+          });
+          const localResults = await res.json();
+          allFoundResults = [...allFoundResults, ...localResults];
+        } catch (err) {
+          console.error("Nexus search failed", err);
+        }
+      }
+
+      // 2. Fetch External (Metasearch) Results via Gemini Grounding if enabled
+      if (activeExternalProviders.length > 0) {
+        const providerNames = activeExternalProviders.map(p => p.id).join(', ');
+        
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: `Search the web for "${query}" and provide exactly 10 high-quality search results. 
+          For each result, provide: title, url, and a helpful snippet. 
+          CRITICAL: Distribute the "source" property among these engines: ${providerNames}. 
+          Each result MUST have a "source" property matching one of these names exactly.`,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING },
+                  url: { type: Type.STRING },
+                  description: { type: Type.STRING },
+                  snippet: { type: Type.STRING },
+                  source: { type: Type.STRING, description: "Must match one of the requested provider names" }
+                },
+                required: ["title", "url", "description", "snippet", "source"]
+              }
+            }
+          }
+        });
+
+        if (response.text) {
+          const externalResults = JSON.parse(response.text).map((r: any) => ({
+            ...r,
+            id: `ext-${Math.random().toString(36).substr(2, 9)}`,
+            score: 0,
+            lastCrawled: Date.now()
+          }));
+          allFoundResults = [...allFoundResults, ...externalResults];
+        }
+      }
+
+      // 3. Re-sort based on provider priority
+      const providerPriorityMap = new Map<string, number>(providers.map(p => [p.id, p.priority]));
+      
+      const sortedResults = allFoundResults.sort((a, b) => {
+        const priorityA = providerPriorityMap.get(a.source) || 999;
+        const priorityB = providerPriorityMap.get(b.source) || 999;
+        
+        if (priorityA !== priorityB) {
+          return priorityA - priorityB;
+        }
+        return (b.score || 0) - (a.score || 0);
       });
-      const data = await res.json();
-      setResults(data);
+
+      setResults(sortedResults);
     } catch (e) {
       console.error("Search failed", e);
     } finally {
