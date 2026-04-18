@@ -13,7 +13,19 @@ import { Search, Globe, Database, Settings, Activity, Link as LinkIcon, RefreshC
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Use lazy initialization to prevent crashes if the key is missing
+let aiInstance: any = null;
+const getAI = () => {
+  if (!aiInstance) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.warn("GEMINI_API_KEY is missing. External search will be disabled.");
+      return null;
+    }
+    aiInstance = new GoogleGenAI({ apiKey });
+  }
+  return aiInstance;
+};
 
 type SearchProvider = 'Nexus' | 'Google' | 'Bing' | 'Yandex' | 'Rambler' | 'Mail.ru';
 
@@ -114,42 +126,47 @@ export default function App() {
 
       // 2. Fetch External (Metasearch) Results via Gemini Grounding if enabled
       if (activeExternalProviders.length > 0) {
-        const providerNames = activeExternalProviders.map(p => p.id).join(', ');
-        
-        const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: `Search the web for "${query}" and provide exactly 10 high-quality search results. 
-          For each result, provide: title, url, and a helpful snippet. 
-          CRITICAL: Distribute the "source" property among these engines: ${providerNames}. 
-          Each result MUST have a "source" property matching one of these names exactly.`,
-          config: {
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING },
-                  url: { type: Type.STRING },
-                  description: { type: Type.STRING },
-                  snippet: { type: Type.STRING },
-                  source: { type: Type.STRING, description: "Must match one of the requested provider names" }
-                },
-                required: ["title", "url", "description", "snippet", "source"]
+        const ai = getAI();
+        if (ai) {
+          const providerNames = activeExternalProviders.map(p => p.id).join(', ');
+          
+          const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: `Search the web for "${query}" and provide exactly 10 high-quality search results. 
+            For each result, provide: title, url, and a helpful snippet. 
+            CRITICAL: Distribute the "source" property among these engines: ${providerNames}. 
+            Each result MUST have a "source" property matching one of these names exactly.`,
+            config: {
+              tools: [{ googleSearch: {} }],
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    url: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    snippet: { type: Type.STRING },
+                    source: { type: Type.STRING, description: "Must match one of the requested provider names" }
+                  },
+                  required: ["title", "url", "description", "snippet", "source"]
+                }
               }
             }
-          }
-        });
+          });
 
-        if (response.text) {
-          const externalResults = JSON.parse(response.text).map((r: any) => ({
-            ...r,
-            id: `ext-${Math.random().toString(36).substr(2, 9)}`,
-            score: 0,
-            lastCrawled: Date.now()
-          }));
-          allFoundResults = [...allFoundResults, ...externalResults];
+          if (response.text) {
+            const externalResults = JSON.parse(response.text).map((r: any) => ({
+              ...r,
+              id: `ext-${Math.random().toString(36).substr(2, 9)}`,
+              score: 0,
+              lastCrawled: Date.now()
+            }));
+            allFoundResults = [...allFoundResults, ...externalResults];
+          }
+        } else {
+          console.warn("Skipping external search: AI not initialized");
         }
       }
 
